@@ -1,0 +1,7 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {normalizeCA,manualCap,selectQuote} from '../lib/domain.mjs';
+test('EVM lowercase; Solana case and byte length validation',()=>{assert.equal(normalizeCA('bsc','0x55d398326f99059fF775485246999027B3197955'),'0x55d398326f99059ff775485246999027b3197955');assert.equal(normalizeCA('solana','So11111111111111111111111111111111111111112'),'So11111111111111111111111111111111111111112');assert.throws(()=>normalizeCA('solana','abc'));assert.throws(()=>normalizeCA('other','0x123'));});
+test('manual market cap is positive decimal, optional blank',()=>{assert.equal(manualCap(''),'');assert.equal(manualCap('123.45'),'123.45');for(const v of ['0','-1','NaN','Infinity','1e99'])assert.throws(()=>manualCap(v));});
+test('select deep base pool, ignore quote-only matches and never use FDV',()=>{const ca='0x'+'a'.repeat(40);const pair=(address,l,cap)=>({chainId:'base',baseToken:{address,name:'A',symbol:'A'},quoteToken:{address:ca},liquidity:{usd:l},priceUsd:'1',marketCap:cap,fdv:999,priceChange:{h24:4},pairAddress:'pool'+l});const q=selectQuote([pair(ca,10,20),pair(ca,100,null),pair('0x'+'b'.repeat(40),10000,10000)],'base',ca);assert.equal(q.marketCap,null);assert.equal(q.pair,'pool100');assert.equal(q.change24h,4);});
+test('missing pair stays missing',()=>assert.equal(selectQuote([],'base','0x'+'a'.repeat(40)).status,'missing'));

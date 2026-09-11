@@ -1,0 +1,20 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {historicalEstimate,previousCandle} from '../lib/history.mjs';import {handle} from '../lib/backend.mjs';
+const ca='0x'+'a'.repeat(40),pool='0x'+'b'.repeat(40),target=Date.parse('2026-09-01T12:32:25Z'),start=Date.parse('2026-09-01T12:31:00Z')/1000;
+const row=(ts,price=2,volume=10)=>[ts,1,3,1,price,volume];
+const env={SUPABASE_URL:'https://db.test',SUPABASE_ANON_KEY:'public',SUPABASE_SECRET_KEY:'sb_secret_test'};
+const request=(path,body)=>new Request('https://board.test/api/'+path,{method:'POST',headers:{origin:'https://board.test',cookie:'wb_access=test','content-type':'application/json'},body:JSON.stringify(body)});
+function fetcher(options={}){return async(url,init)=>{
+ if(url.endsWith('/auth/v1/user'))return Response.json({id:'member'});
+ if(url.includes('/members?'))return Response.json([{enabled:true,role:'admin'}]);
+ if(url.includes('/tokens?select=id'))return Response.json([]);
+ if(url.includes('/tokens?select=chain'))return Response.json([{chain:'base',ca}]);
+ if(url.includes('/api/v2/')){if(options.rate)return new Response('',{status:429,headers:{'Retry-After':'60'}});if(url.includes('/ohlcv/')){assert.ok(url.includes('token='+ca));assert.ok(url.includes('include_empty_intervals=false'));return Response.json({data:{attributes:{ohlcv_list:options.empty?[]:[row(start+60,999),row(start)]}}})}return Response.json({included:[{type:'pool',attributes:{address:pool,pool_created_at:'2025-01-01',reserve_in_usd:'100'},relationships:{base_token:{data:{id:'base_'+ca}}}}]})}
+ if(url.startsWith('https://api.dexscreener.com/'))return Response.json([{chainId:'base',baseToken:{address:ca},pairAddress:pool,priceUsd:'4',liquidity:{usd:100},marketCap:options.noCap?null:4000,fdv:8000}]);
+ if(url.includes('/rpc/add_token_v3')){options.onAdd?.(JSON.parse(init.body));return Response.json({id:'new',existing:false})}
+ throw Error('Unexpected request '+url);
+}}
+test('uses only completed, recent, traded minute candle before selected second',()=>{assert.equal(previousCandle([row(start+60,999),row(start),row(start-60)],target)[4],2);assert.equal(previousCandle([row(start,2,0),row(start-600)],target),null)});
+test('estimate uses historical close and current market-cap implied supply',async()=>{const d=await historicalEstimate('base',ca,new Date(target).toISOString(),fetcher(),target+3600000);assert.equal(Number(d.amount),2000);assert.equal(d.inferredSupply,1000);assert.equal(d.granularity,'1m');assert.equal(d.candleEnd,'2026-09-01T12:32:00.000Z')});
+test('missing candles or market cap never falls back to FDV; rate limits preserved',async()=>{for(const options of [{noCap:true},{empty:true}])await assert.rejects(historicalEstimate('base',ca,new Date(target).toISOString(),fetcher(options),target+3600000));await assert.rejects(historicalEstimate('base',ca,new Date(target).toISOString(),fetcher({rate:true}),target+3600000),e=>e.status===429&&e.retryAfter==='60')});
+test('history proof binds amount, CA and requested time; custom time blank has no current baseline',async()=>{const time=new Date(target).toISOString();const r=await handle(request('history',{chain:'base',ca,createdAt:time}),env,fetcher());assert.equal(r.status,200);const {estimate}=await r.json();let saved;let add=await handle(request('tokens',{chain:'base',ca,createdAt:time,capValue:'2',capUnit:'K',estimate}),env,fetcher({onAdd:d=>saved=d}));assert.equal(add.status,200);assert.equal(saved.p_source,'estimated');assert.equal(saved.p_estimate.provider,'geckoterminal');add=await handle(request('tokens',{chain:'base',ca,createdAt:time,capValue:'3',capUnit:'K',estimate}),env,fetcher());assert.equal(add.status,400);add=await handle(request('tokens',{chain:'base',ca,createdAt:time,capValue:'',capUnit:'K'}),env,fetcher({onAdd:d=>saved=d}));assert.equal(add.status,200);assert.equal(saved.p_cap,null);assert.equal(saved.p_source,'unavailable')});

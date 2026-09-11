@@ -1,0 +1,24 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {PGlite} from '@electric-sql/pglite';
+test('PostgreSQL transactions, baseline protection, version and favorites RLS',async()=>{
+ const db=new PGlite();
+ await db.exec(`create role anon;create role authenticated;create role service_role bypassrls;create schema auth;create table auth.users(id uuid primary key);create function auth.uid() returns uuid language sql as $$ select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $$;grant usage on schema auth to anon,authenticated,service_role;grant execute on function auth.uid() to anon,authenticated,service_role;`);
+ await db.exec(await readFile(new URL('../supabase/001_watchboard.sql',import.meta.url),'utf8'));
+ const a='11111111-1111-4111-8111-111111111111',b='22222222-2222-4222-8222-222222222222',ca='0x'+'a'.repeat(40);
+ await db.query('insert into auth.users values($1),($2)',[a,b]);await db.query("insert into members(user_id,role) values($1,'admin'),($2,'member')",[a,b]);
+ const add=(actor,chain,cap)=>db.query("select add_token($1,$2,$3,'Token','TOK',$4,'manual',null,null) as result",[actor,chain,ca,cap]);
+ const results=await Promise.all([add(a,'base',100),add(b,'base',200)]);assert.equal(results[0].rows[0].result.id,results[1].rows[0].result.id);assert.equal(results[1].rows[0].result.existing,true);
+ const id=results[0].rows[0].result.id;assert.equal((await db.query('select count(*)::int as n from tokens')).rows[0].n,1);assert.equal(Number((await db.query('select baseline_market_cap from tokens')).rows[0].baseline_market_cap),100);assert.equal(Number((await db.query('select version from board_state')).rows[0].version),1);
+ await assert.rejects(db.query('update tokens set baseline_market_cap=900 where id=$1',[id]),/immutable/);
+ await add(a,'bsc',150);assert.equal((await db.query('select count(*)::int as n from tokens')).rows[0].n,2);
+ await assert.rejects(db.query('select archive_token($1,$2,true)',[b,id]),/Administrator/);
+ await db.query('select archive_token($1,$2,true)',[a,id]);await add(b,'base',999);await db.query('select archive_token($1,$2,false)',[a,id]);assert.equal(Number((await db.query('select baseline_market_cap from tokens where id=$1',[id])).rows[0].baseline_market_cap),100);
+ await db.exec('set role authenticated');await db.query("select set_config('request.jwt.claim.sub',$1,false)",[a]);
+ await db.query('insert into favorites values($1,$2)',[a,id]);await assert.rejects(db.query('insert into favorites values($1,$2)',[b,id]),/row-level security/);
+ await db.query("select set_config('request.jwt.claim.sub',$1,false)",[b]);assert.equal((await db.query('select * from favorites')).rows.length,0);await db.query('delete from favorites where user_id=$1',[a]);
+ await assert.rejects(add(b,'ethereum',5),/permission denied/);
+ await db.exec('reset role');assert.equal((await db.query('select * from favorites')).rows.length,1);
+ const board=(await db.query('select read_board() as b')).rows[0].b;assert.equal(board.tokens.length,2);assert.equal(typeof board.version,'string');assert.ok(!('created_by' in board.tokens[0]));await db.close();
+});

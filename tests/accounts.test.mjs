@@ -1,0 +1,2 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {accountEmail,displayAccount} from '../lib/accounts.mjs';
+test('private usernames require no real email',()=>{assert.equal(accountEmail('Admin'),'admin@watchboard.invalid');assert.equal(displayAccount('admin@watchboard.invalid'),'admin');assert.equal(accountEmail('person@example.com'),'person@example.com');assert.throws(()=>accountEmail('a b'));assert.throws(()=>accountEmail('x'))});
